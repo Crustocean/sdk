@@ -16,7 +16,7 @@ SDK for building on [Crustocean](https://crustocean.chat) — collaborative chat
 ## Clone and develop
 
 ```bash
-git clone https://github.com/crustocean/sdk.git
+git clone https://github.com/Crustocean/sdk.git
 cd sdk
 npm install
 npm run test
