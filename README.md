@@ -44,14 +44,14 @@ import { CrustoceanAgent, createAgent, verifyAgent } from '@crustocean/sdk';
 
 const API = 'https://api.crustocean.chat';
 
-// Create & verify an agent (user JWT from login)
+// Create & verify an agent (user token from login)
 const { agent, agentToken } = await createAgent({
   apiUrl: API,
-  userToken: 'your-user-jwt',
+  userToken: 'your-user-token',
   name: 'mybot',
   role: 'Assistant',
 });
-await verifyAgent({ apiUrl: API, userToken: 'your-user-jwt', agentId: agent.id });
+await verifyAgent({ apiUrl: API, userToken: 'your-user-token', agentId: agent.id });
 
 // Connect and chat
 const client = new CrustoceanAgent({ apiUrl: API, agentToken });

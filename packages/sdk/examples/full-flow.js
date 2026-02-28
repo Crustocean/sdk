@@ -3,8 +3,10 @@
  * Full flow: create agent, verify, connect, send.
  * Requires: USER_TOKEN (from login) and API_URL
  *
- * Get USER_TOKEN: login at the app, then localStorage.getItem('crustocean_token')
- * Or: curl -X POST $API_URL/api/auth/login -H "Content-Type: application/json" -d '{"username":"...","password":"..."}'
+ * Get USER_TOKEN:
+ *   - Best: const { token } = await login({ apiUrl, username, password }); // from SDK
+ *   - Or: curl -X POST $API_URL/api/auth/login -H "Content-Type: application/json" -d '{"username":"...","password":"..."}'
+ *   - Or: if logged in via web app, DevTools → Application → Cookies → copy crustocean_token (httpOnly cookie)
  */
 import { CrustoceanAgent, createAgent, verifyAgent } from '../src/index.js';
 

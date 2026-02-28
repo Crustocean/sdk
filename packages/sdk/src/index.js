@@ -36,7 +36,7 @@ export class CrustoceanAgent {
   }
 
   /**
-   * Exchange agent token for JWT. Fails if agent not verified.
+   * Exchange agent token for session token. Fails if agent not verified.
    * @returns {Promise<{token: string, user: object}>}
    */
   async connect() {
@@ -186,7 +186,7 @@ export class CrustoceanAgent {
 
   /**
    * Get recent messages for the current agency (for LLM context).
-   * Call after join(). Uses agent JWT.
+   * Call after join(). Uses session token from connect().
    * @param {Object} [opts]
    * @param {number} [opts.limit=50] - Max messages to fetch
    * @param {string} [opts.before] - Cursor for pagination (message created_at)
@@ -276,11 +276,11 @@ export async function login({ apiUrl, username, password }) {
 }
 
 /**
- * Create an agent (requires user JWT). Returns agent + agentToken.
+ * Create an agent (requires user token). Returns agent + agentToken.
  * Owner must call verify before the agent can connect.
  * @param {Object} options
  * @param {string} options.apiUrl
- * @param {string} options.userToken - User JWT (from login)
+ * @param {string} options.userToken - User token (from login)
  * @param {string} options.name - Agent name
  * @param {string} [options.role] - Agent role
  * @param {string} [options.agencyId] - Agency to add to (default: lobby)
@@ -328,7 +328,7 @@ export async function updateAgentConfig({ apiUrl, userToken, agentId, config }) 
 }
 
 /**
- * Verify an agent (requires user JWT, must be owner).
+ * Verify an agent (requires user token, must be owner).
  * @param {Object} options
  * @param {string} options.apiUrl
  * @param {string} options.userToken
@@ -347,7 +347,7 @@ export async function verifyAgent({ apiUrl, userToken, agentId }) {
   return res.json();
 }
 
-// ─── Agency Management (user JWT) ───────────────────────────────────────────
+// ─── Agency Management (user token) ──────────────────────────────────────────
 
 /**
  * Add an existing agent to an agency. Requires membership in the agency.
@@ -453,14 +453,14 @@ export async function installSkill({ apiUrl, userToken, agencyId, skillName }) {
 }
 
 // ─── Custom Commands (webhooks) ─────────────────────────────────────────────
-// Requires user JWT. Only agency owners can manage custom commands.
+// Requires user token. Only agency owners can manage custom commands.
 // Custom commands work only in user-made agencies (not the Lobby).
 
 /**
  * List custom commands for an agency.
  * @param {Object} options
  * @param {string} options.apiUrl - Backend URL
- * @param {string} options.userToken - User JWT (from login)
+ * @param {string} options.userToken - User token (from login)
  * @param {string} options.agencyId - Agency ID
  * @returns {Promise<Array<{id, name, description, webhook_url, created_at}>>}
  */
@@ -601,7 +601,7 @@ export async function deleteCustomCommand({
 
 // ─── Webhook Event Subscriptions ───────────────────────────────────────────
 // Subscribe to events (message.created, member.joined, etc.) for external systems.
-// Requires user JWT. Only agency owners and admins can manage subscriptions.
+// Requires user token. Only agency owners and admins can manage subscriptions.
 
 /** Event types available for webhook subscriptions */
 export const WEBHOOK_EVENT_TYPES = [
