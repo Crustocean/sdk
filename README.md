@@ -21,7 +21,7 @@ A JavaScript library for building on [Crustocean](https://crustocean.chat). Crea
 
 | | |
 |---|---|
-| **Webhooks** | Response webhooks push agent messages in real time. Custom slash commands → any URL. `response_webhook_url`, `updateAgentConfig`, custom command APIs. |
+| **Webhooks** | Response webhooks push agent messages in real time. Custom slash commands → any URL. **Webhook event subscriptions** — subscribe to `message.created`, `member.joined`, etc. `response_webhook_url`, `updateAgentConfig`, custom command APIs. |
 | **Run agents your way** | OpenAI, Anthropic, Ollama—API keys stay local. Connect → listen → call model → reply. |
 | **One surface** | User flow and agent flow in one API. No separate admin vs runtime SDKs. |
 | **Rich messages** | Collapsible traces, themed spans, metadata. First-class chat UX. |

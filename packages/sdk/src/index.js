@@ -598,3 +598,174 @@ export async function deleteCustomCommand({
     throw new Error(err.error || `Delete failed: ${res.status}`);
   }
 }
+
+// ─── Webhook Event Subscriptions ───────────────────────────────────────────
+// Subscribe to events (message.created, member.joined, etc.) for external systems.
+// Requires user JWT. Only agency owners and admins can manage subscriptions.
+
+/** Event types available for webhook subscriptions */
+export const WEBHOOK_EVENT_TYPES = [
+  'message.created',
+  'message.deleted',
+  'member.joined',
+  'member.left',
+  'member.kicked',
+  'member.banned',
+  'member.unbanned',
+  'member.promoted',
+  'member.demoted',
+  'agency.created',
+  'agency.updated',
+  'invite.created',
+  'invite.redeemed',
+];
+
+/**
+ * List available webhook event types. No auth required.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @returns {Promise<{events: string[], description: string}>}
+ */
+export async function listWebhookEventTypes({ apiUrl }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/webhook-subscriptions/meta/events`);
+  if (!res.ok) throw new Error(`Failed to fetch events: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * List webhook subscriptions for an agency. Owner/admin only.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.agencyId
+ * @returns {Promise<Array<{id, url, events, description, enabled, created_at, updated_at}>>}
+ */
+export async function listWebhookSubscriptions({ apiUrl, userToken, agencyId }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/webhook-subscriptions/${agencyId}`, {
+    headers: { Authorization: `Bearer ${userToken}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `List failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Create a webhook subscription. Owner/admin only.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.agencyId
+ * @param {string} options.url - Webhook URL to POST events to
+ * @param {string[]} options.events - Event types to subscribe to (e.g. ['message.created', 'member.joined'])
+ * @param {string} [options.secret] - Optional secret for X-Crustocean-Signature header (HMAC-SHA256)
+ * @param {string} [options.description] - Optional description
+ * @param {boolean} [options.enabled=true]
+ * @returns {Promise<{id, url, events, description, enabled, created_at, updated_at}>}
+ */
+export async function createWebhookSubscription({
+  apiUrl,
+  userToken,
+  agencyId,
+  url,
+  events,
+  secret,
+  description,
+  enabled,
+}) {
+  const api = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${api}/api/webhook-subscriptions/${agencyId}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${userToken}`,
+    },
+    body: JSON.stringify({ url, events, secret, description, enabled }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Create failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Update a webhook subscription. Owner/admin only.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.agencyId
+ * @param {string} options.subscriptionId
+ * @param {string} [options.url]
+ * @param {string[]} [options.events]
+ * @param {string} [options.secret]
+ * @param {string} [options.description]
+ * @param {boolean} [options.enabled]
+ */
+export async function updateWebhookSubscription({
+  apiUrl,
+  userToken,
+  agencyId,
+  subscriptionId,
+  url,
+  events,
+  secret,
+  description,
+  enabled,
+}) {
+  const api = apiUrl.replace(/\/$/, '');
+  const body = {};
+  if (url !== undefined) body.url = url;
+  if (events !== undefined) body.events = events;
+  if (secret !== undefined) body.secret = secret;
+  if (description !== undefined) body.description = description;
+  if (enabled !== undefined) body.enabled = enabled;
+
+  const res = await fetch(
+    `${api}/api/webhook-subscriptions/${agencyId}/${subscriptionId}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${userToken}`,
+      },
+      body: JSON.stringify(body),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Update failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Delete a webhook subscription. Owner/admin only.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.agencyId
+ * @param {string} options.subscriptionId
+ */
+export async function deleteWebhookSubscription({
+  apiUrl,
+  userToken,
+  agencyId,
+  subscriptionId,
+}) {
+  const api = apiUrl.replace(/\/$/, '');
+  const res = await fetch(
+    `${api}/api/webhook-subscriptions/${agencyId}/${subscriptionId}`,
+    {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${userToken}` },
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Delete failed: ${res.status}`);
+  }
+}
