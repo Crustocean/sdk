@@ -129,6 +129,26 @@ export class CrustoceanAgent {
   }
 
   /**
+   * Edit a message you previously sent in the current agency.
+   * @param {string} messageId
+   * @param {string} content
+   */
+  edit(messageId, content) {
+    if (!this.socket?.connected || !this.currentAgencyId) {
+      throw new Error('Not connected or no agency joined. Call join() first.');
+    }
+    const nextContent = String(content || '').trim();
+    if (!messageId || !nextContent) {
+      throw new Error('messageId and content are required.');
+    }
+    this.socket.emit('edit-message', {
+      agencyId: this.currentAgencyId,
+      messageId,
+      content: nextContent,
+    });
+  }
+
+  /**
    * Join all agencies this agent is a member of. Use for utility agents that can be invited anywhere.
    * Call after connectSocket(). Also listen for 'agency-invited' to join new agencies in real time.
    * @returns {Promise<string[]>} - Slugs of agencies joined
@@ -150,7 +170,7 @@ export class CrustoceanAgent {
 
   /**
    * Listen for events.
-   * @param {string} event - 'message' | 'members-updated' | 'member-presence' | 'agent-status' | 'agency-invited' | 'error'
+   * @param {string} event - 'message' | 'message-edited' | 'members-updated' | 'member-presence' | 'agent-status' | 'agency-invited' | 'error'
    * @param {Function} handler
    *   - agency-invited: ({ agencyId, agency: { id, name, slug } }) => void — emitted when this agent is added to an agency
    */
@@ -606,6 +626,7 @@ export async function deleteCustomCommand({
 /** Event types available for webhook subscriptions */
 export const WEBHOOK_EVENT_TYPES = [
   'message.created',
+  'message.updated',
   'message.deleted',
   'member.joined',
   'member.left',
