@@ -14,9 +14,103 @@
  */
 export function shouldRespond(msg, agentUsername) {
   if (!msg?.content || !agentUsername) return false;
-  const lower = msg.content.toLowerCase();
-  const mention = `@${agentUsername.toLowerCase()}`;
-  return lower.includes(mention);
+  const content = String(msg.content);
+  const normalized = String(agentUsername).trim().toLowerCase().replace(/^@+/, '');
+  if (!normalized) return false;
+
+  // Exact @mention match only:
+  // - allows start/punctuation/whitespace before @handle
+  // - requires a non-handle char (or end of string) after the handle
+  // This prevents "@larry" from matching "@larry_loobster".
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const mentionPattern = new RegExp(`(^|[^a-z0-9_-])@${escaped}(?![a-z0-9_-])`, 'i');
+  return mentionPattern.test(content);
+}
+
+function parseLoopMetadata(input) {
+  if (!input) return null;
+  const metadata = input && typeof input === 'object' && 'metadata' in input ? input.metadata : input;
+  let parsed = metadata;
+  if (typeof metadata === 'string') {
+    try {
+      parsed = JSON.parse(metadata || '{}');
+    } catch {
+      return null;
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const guard = parsed.loop_guard;
+  if (!guard || typeof guard !== 'object') return null;
+  const hop = Number(guard.hop);
+  const maxHops = Number(guard.max_hops);
+  return {
+    interaction_id: guard.interaction_id || null,
+    hop: Number.isFinite(hop) && hop >= 0 ? hop : 0,
+    max_hops: Number.isFinite(maxHops) && maxHops > 0 ? maxHops : null,
+    status: guard.status || 'active',
+  };
+}
+
+function loopInteractionId() {
+  return `lg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Read loop guard metadata from a message (or metadata object/string).
+ * @param {Object|string} msgOrMetadata - Message object or metadata
+ * @returns {{ interaction_id: string|null, hop: number, max_hops: number|null, status: string }|null}
+ */
+export function getLoopGuardMetadata(msgOrMetadata) {
+  return parseLoopMetadata(msgOrMetadata);
+}
+
+/**
+ * Build metadata.loop_guard for a reply message.
+ * Pass the triggering message to preserve interaction_id and increment hop.
+ * @param {Object} [opts]
+ * @param {Object} [opts.previousMessage]
+ * @param {number} [opts.maxHops=20]
+ * @param {string} [opts.status='active']
+ * @returns {{ loop_guard: { interaction_id: string, hop: number, max_hops: number, status: string } }}
+ */
+export function createLoopGuardMetadata({ previousMessage, maxHops = 20, status = 'active' } = {}) {
+  const previous = parseLoopMetadata(previousMessage);
+  const safeMaxHops = Number.isFinite(Number(maxHops)) && Number(maxHops) > 0 ? Number(maxHops) : 20;
+  const prevHop = previous && Number.isFinite(previous.hop) && previous.hop >= 0 ? previous.hop : 0;
+  const nextHop = previous ? prevHop + 1 : 1;
+  return {
+    loop_guard: {
+      interaction_id: previous?.interaction_id || loopInteractionId(),
+      hop: nextHop,
+      max_hops: previous?.max_hops || safeMaxHops,
+      status: status || 'active',
+    },
+  };
+}
+
+/**
+ * Mention check + loop-guard check in one call.
+ * @param {Object} msg - Message object
+ * @param {string} agentUsername - This agent's handle
+ * @param {Object} [opts]
+ * @param {number} [opts.maxHops=20] - Fallback max hops when message has no max_hops
+ * @returns {{ ok: boolean, reason: string, loop_guard: object|null }}
+ */
+export function shouldRespondWithGuard(msg, agentUsername, opts = {}) {
+  if (!shouldRespond(msg, agentUsername)) {
+    return { ok: false, reason: 'not_mentioned', loop_guard: null };
+  }
+  const guard = parseLoopMetadata(msg);
+  if (!guard) return { ok: true, reason: 'ok', loop_guard: null };
+  if (guard.status && guard.status !== 'active') {
+    return { ok: false, reason: `interaction_${guard.status}`, loop_guard: guard };
+  }
+  const fallbackMax = Number.isFinite(Number(opts.maxHops)) && Number(opts.maxHops) > 0 ? Number(opts.maxHops) : 20;
+  const max = guard.max_hops || fallbackMax;
+  if (guard.hop >= max) {
+    return { ok: false, reason: 'max_hops_reached', loop_guard: guard };
+  }
+  return { ok: true, reason: 'ok', loop_guard: guard };
 }
 
 export class CrustoceanAgent {

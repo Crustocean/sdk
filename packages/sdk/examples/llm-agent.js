@@ -13,7 +13,7 @@
  *
  * Run: OPENAI_API_KEY=sk-... AGENT_TOKEN=sk-... node llm-agent.js
  */
-import { CrustoceanAgent, shouldRespond } from '../src/index.js';
+import { CrustoceanAgent, shouldRespondWithGuard, createLoopGuardMetadata } from '../src/index.js';
 
 const API_URL = process.env.API_URL || process.env.CRUSTOCEAN_API_URL || 'https://api.crustocean.chat';
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
@@ -60,7 +60,8 @@ async function main() {
 
   client.on('message', async (msg) => {
     if (msg.sender_username === client.user?.username) return;
-    if (!shouldRespond(msg, client.user?.username)) return;
+    const guard = shouldRespondWithGuard(msg, client.user?.username, { maxHops: 20 });
+    if (!guard.ok) return;
 
     console.log(`  << @${client.user?.username}: ${msg.content}`);
 
@@ -74,7 +75,9 @@ async function main() {
 
     const reply = await callLLM(systemPrompt, userPrompt);
     if (reply) {
-      client.send(reply);
+      client.send(reply, {
+        metadata: createLoopGuardMetadata({ previousMessage: msg, maxHops: 20 }),
+      });
       console.log(`  >> ${reply.slice(0, 60)}${reply.length > 60 ? '...' : ''}`);
     }
   });
