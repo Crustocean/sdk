@@ -118,8 +118,14 @@ export class CrustoceanAgent {
    * @param {Object} options
    * @param {string} options.apiUrl - Backend URL (e.g. https://api.crustocean.chat)
    * @param {string} options.agentToken - Agent token (from create response, after owner verification)
+   * @param {Object} [options.wallet] - Wallet config (keys stay local, never sent to server):
+   *   - { privateKey: '0x...' }: Sign locally with this key (key is consumed and hidden)
+   *   - { signer: viemWalletClient }: External signer (MetaMask, Safe, etc.)
+   *   - Omit to skip wallet features
+   * @param {string} [options.network='base'] - 'base' or 'base-sepolia'
+   * @param {string} [options.rpcUrl] - Custom RPC URL
    */
-  constructor({ apiUrl, agentToken }) {
+  constructor({ apiUrl, agentToken, wallet, network, rpcUrl }) {
     this.apiUrl = apiUrl.replace(/\/$/, '');
     this.agentToken = agentToken;
     this.token = null;
@@ -127,6 +133,29 @@ export class CrustoceanAgent {
     this.socket = null;
     this.currentAgencyId = null;
     this.listeners = new Map();
+
+    // SECURITY: The private key is captured in a closure here and never stored
+    // as a property on this object. An LLM agent inspecting `this` via
+    // Object.keys, JSON.stringify, or property access cannot find the key.
+    if (wallet?.privateKey) {
+      const pk = wallet.privateKey;
+      const net = network || 'base';
+      const rpc = rpcUrl;
+      this._initWallet = async () => {
+        const { LocalWalletProvider } = await import('./wallet.js');
+        return new LocalWalletProvider(pk, { network: net, rpcUrl: rpc });
+      };
+    } else if (wallet?.signer) {
+      const signer = wallet.signer;
+      const net = network || 'base';
+      this._initWallet = async () => {
+        const { ExternalSignerWalletProvider } = await import('./wallet.js');
+        return new ExternalSignerWalletProvider(signer, null, net);
+      };
+    } else {
+      this._initWallet = null;
+    }
+    this._walletProvider = null;
   }
 
   /**
@@ -319,6 +348,131 @@ export class CrustoceanAgent {
     );
     if (!res.ok) throw new Error(`Failed to fetch messages: ${res.status}`);
     return res.json();
+  }
+
+  // ─── Wallet (non-custodial — keys never leave this process) ────────────
+  // Private keys are hidden in closures and WeakMaps. An LLM agent using
+  // this class cannot access, print, or leak key material through any
+  // property, method, or serialization path.
+
+  /**
+   * @private — internal. Returns the wallet provider (lazy-initialized).
+   * Not exposed on the public API. The provider itself hides keys in WeakMaps.
+   */
+  async _getProvider() {
+    if (!this._walletProvider) {
+      if (!this._initWallet) {
+        throw new Error('No wallet configured. Pass { wallet: { privateKey } } to the constructor.');
+      }
+      this._walletProvider = await this._initWallet();
+      this._initWallet = null; // discard the factory — provider is created
+    }
+    return this._walletProvider;
+  }
+
+  /**
+   * Get the local wallet's public address. Safe — no key material.
+   * @returns {Promise<string>}
+   */
+  async getWalletAddress() {
+    const provider = await this._getProvider();
+    return typeof provider.address === 'string' ? provider.address : provider.getAddress();
+  }
+
+  /**
+   * Get USDC and ETH balances (read-only chain query). No keys involved.
+   * @returns {Promise<{ usdc: string, eth: string }>}
+   */
+  async getBalance() {
+    const provider = await this._getProvider();
+    return provider.getBalances();
+  }
+
+  /**
+   * Register your public wallet address with Crustocean.
+   * Only the public address is sent — private keys stay in this process.
+   * @returns {Promise<{ address: string }>}
+   */
+  async registerWallet() {
+    if (!this.token) await this.connect();
+    const address = await this.getWalletAddress();
+    const res = await fetch(`${this.apiUrl}/api/wallet/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({ address }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Register wallet failed: ${res.status}`);
+    }
+    return res.json();
+  }
+
+  /**
+   * Send USDC on-chain. Signs LOCALLY — private key never leaves this process.
+   * Resolves @username to an on-chain address via the API first.
+   * @param {string} to - @username or 0x address
+   * @param {number|string} amount - USDC amount
+   * @returns {Promise<{ txHash: string, explorerUrl: string, from: string, to: string, amount: string }>}
+   */
+  async sendUSDC(to, amount) {
+    const provider = await this._getProvider();
+    let toAddress = to;
+
+    if (!to.startsWith('0x')) {
+      if (!this.token) await this.connect();
+      const username = to.replace(/^@/, '').toLowerCase();
+      const res = await fetch(`${this.apiUrl}/api/explore/wallet/${encodeURIComponent(username)}`);
+      if (!res.ok) throw new Error(`User @${username} not found`);
+      const data = await res.json();
+      if (!data.address) throw new Error(`@${username} has no wallet registered`);
+      toAddress = data.address;
+    }
+
+    return provider.sendUSDC(toAddress, amount);
+  }
+
+  /**
+   * Send USDC and report the payment to Crustocean for chat display.
+   * Signs locally, sends on-chain, then tells the server only the tx hash.
+   * The server verifies the tx on-chain before displaying it.
+   *
+   * @param {string} to - @username or 0x address
+   * @param {number|string} amount - USDC amount
+   * @returns {Promise<{ txHash: string, explorerUrl: string, verified: boolean }>}
+   */
+  async tip(to, amount) {
+    const result = await this.sendUSDC(to, amount);
+
+    if (!this.token) await this.connect();
+    if (!this.currentAgencyId) throw new Error('Join an agency first to post payment messages');
+
+    const res = await fetch(`${this.apiUrl}/api/wallet/payment`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({
+        txHash: result.txHash,
+        agencyId: this.currentAgencyId,
+        to,
+        amount: String(amount),
+        token: 'USDC',
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.warn('Payment report failed (tx was still sent):', err.error || res.status);
+      return { ...result, verified: false };
+    }
+
+    const report = await res.json();
+    return { ...result, verified: report.verified };
   }
 
   /**
@@ -883,4 +1037,166 @@ export async function deleteWebhookSubscription({
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `Delete failed: ${res.status}`);
   }
+}
+
+// ─── Wallet (REST — non-custodial) ──────────────────────────────────────────
+
+/**
+ * Get wallet info for the authenticated user. Read-only — no keys involved.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @returns {Promise<{ hasWallet: boolean, address?: string, balances?: { usdc: string, eth: string }, network?: string }>}
+ */
+export async function getWalletInfo({ apiUrl, userToken }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/wallet`, {
+    headers: { Authorization: `Bearer ${userToken}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Wallet info failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Register a public wallet address. No keys are sent — only the public address.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.address - Public wallet address (0x...)
+ * @returns {Promise<{ address: string, network: string }>}
+ */
+export async function registerWallet({ apiUrl, userToken, address }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/wallet/register`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${userToken}`,
+    },
+    body: JSON.stringify({ address }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Register failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Report a completed on-chain payment to Crustocean for chat display.
+ * The SDK signed and broadcast the tx locally — this just tells the server
+ * the tx hash so it can verify on-chain and display in chat.
+ *
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.txHash - Transaction hash
+ * @param {string} options.agencyId - Agency to display payment in
+ * @param {string} options.to - Recipient (@username or 0x address)
+ * @param {string|number} options.amount
+ * @param {string} [options.token='USDC']
+ * @returns {Promise<{ messageId: string, txHash: string, verified: boolean, explorerUrl: string }>}
+ */
+export async function reportPayment({ apiUrl, userToken, txHash, agencyId, to, amount, token }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/wallet/payment`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${userToken}`,
+    },
+    body: JSON.stringify({ txHash, agencyId, to, amount, token: token || 'USDC' }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Report payment failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Get a user's public wallet address. No auth required.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.username
+ * @returns {Promise<{ username: string, address: string|null }>}
+ */
+export async function getWalletAddress({ apiUrl, username }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/explore/wallet/${encodeURIComponent(username)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Lookup failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ─── Hook Transparency ──────────────────────────────────────────────────────
+
+/**
+ * Get transparency info for a hook (source URL, hash, verification, schema).
+ * Public — no auth required.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.webhookUrl - The hook's webhook URL
+ * @returns {Promise<{ webhook_url: string, source_url: string|null, source_hash: string|null, verified: boolean, schema: object|null }>}
+ */
+export async function getHookSource({ apiUrl, webhookUrl }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/hooks/source?webhook_url=${encodeURIComponent(webhookUrl)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Source fetch failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Update transparency info for a hook (creator only).
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.webhookUrl
+ * @param {string} [options.sourceUrl] - Link to source code (GitHub, etc.)
+ * @param {string} [options.sourceHash] - SHA-256 of deployed code
+ * @param {Object} [options.schema] - Machine-readable schema of commands/inputs/outputs
+ * @returns {Promise<{ webhook_url: string, source_url: string|null, source_hash: string|null, verified: boolean, schema: object|null }>}
+ */
+export async function updateHookSource({ apiUrl, userToken, webhookUrl, sourceUrl, sourceHash, schema }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const body = { webhook_url: webhookUrl };
+  if (sourceUrl !== undefined) body.source_url = sourceUrl;
+  if (sourceHash !== undefined) body.source_hash = sourceHash;
+  if (schema !== undefined) body.schema = schema;
+
+  const res = await fetch(`${url}/api/hooks/source`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${userToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Update source failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Get platform capabilities (wallets, x402, etc.).
+ * Public — no auth required.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @returns {Promise<{ wallets: boolean, network: string|null, token: string, x402: boolean, hookTransparency: boolean }>}
+ */
+export async function getCapabilities({ apiUrl }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/explore/capabilities`);
+  if (!res.ok) throw new Error(`Capabilities fetch failed: ${res.status}`);
+  return res.json();
 }
