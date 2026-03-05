@@ -980,6 +980,36 @@ export async function verifyAgent({ apiUrl, userToken, agentId }) {
   return res.json();
 }
 
+/**
+ * Transfer agent ownership to another user (requires user token, must be current owner).
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.agentId
+ * @param {string} [options.newOwnerUsername] - Username of the new owner
+ * @param {string} [options.newOwnerId] - User ID of the new owner (alternative to username)
+ */
+export async function transferAgent({ apiUrl, userToken, agentId, newOwnerUsername, newOwnerId }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const body = {};
+  if (newOwnerId) body.newOwnerId = newOwnerId;
+  else if (newOwnerUsername) body.newOwnerUsername = newOwnerUsername;
+  else throw new Error('newOwnerUsername or newOwnerId required');
+  const res = await fetch(`${url}/api/agents/${agentId}/transfer`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${userToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Transfer failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ─── Agency Management (user token) ──────────────────────────────────────────
 
 /**
@@ -1550,6 +1580,118 @@ export async function updateHookSource({ apiUrl, userToken, webhookUrl, sourceUr
     throw new Error(err.error || `Update source failed: ${res.status}`);
   }
   return res.json();
+}
+
+// --- Hook Entity CRUD ---
+
+/**
+ * Get a hook entity by ID.
+ * Public -- no auth required.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.hookId
+ * @returns {Promise<{ id, webhook_url, name, slug, at_name, description, creator, default_invoke_permission, enabled, source_url, source_hash, verified, schema, commands }>}
+ */
+export async function getHook({ apiUrl, hookId }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/hooks/by-id/${encodeURIComponent(hookId)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Get hook failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Get a hook entity by slug.
+ * Public -- no auth required.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.slug
+ * @returns {Promise<{ id, webhook_url, name, slug, at_name, description, creator, default_invoke_permission, enabled, source_url, source_hash, verified, schema, commands }>}
+ */
+export async function getHookBySlug({ apiUrl, slug }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/hooks/by-slug/${encodeURIComponent(slug)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Get hook failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Update a hook entity. Creator only.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.hookId
+ * @param {string} [options.name]
+ * @param {string} [options.description]
+ * @param {string} [options.default_invoke_permission]
+ * @param {boolean} [options.enabled]
+ */
+export async function updateHook({ apiUrl, userToken, hookId, name, description, default_invoke_permission, enabled }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const body = {};
+  if (name !== undefined) body.name = name;
+  if (description !== undefined) body.description = description;
+  if (default_invoke_permission !== undefined) body.default_invoke_permission = default_invoke_permission;
+  if (enabled !== undefined) body.enabled = enabled;
+
+  const res = await fetch(`${url}/api/hooks/by-id/${encodeURIComponent(hookId)}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${userToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Update hook failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Rotate the global hook key. Creator only.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.hookId
+ * @returns {Promise<{ hookKey: string }>}
+ */
+export async function rotateHookKey({ apiUrl, userToken, hookId }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/hooks/by-id/${encodeURIComponent(hookId)}/rotate-key`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${userToken}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Rotate key failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Revoke the global hook key. Creator only.
+ * @param {Object} options
+ * @param {string} options.apiUrl
+ * @param {string} options.userToken
+ * @param {string} options.hookId
+ */
+export async function revokeHookKey({ apiUrl, userToken, hookId }) {
+  const url = apiUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/api/hooks/by-id/${encodeURIComponent(hookId)}/revoke-key`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${userToken}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Revoke key failed: ${res.status}`);
+  }
 }
 
 /**
