@@ -5,6 +5,9 @@
  * x402 (HTTP 402 payments): import { createX402Fetch } from '@crustocean/sdk/x402'
  */
 
+import { randomUUID as _randomUUID } from 'crypto';
+const crypto = { randomUUID: typeof globalThis.crypto?.randomUUID === 'function' ? () => globalThis.crypto.randomUUID() : _randomUUID };
+
 /**
  * Check if an agent should respond to a message (e.g. @mention).
  * Use in your message handler to decide when to call your LLM.
@@ -133,6 +136,7 @@ export class CrustoceanAgent {
     this.socket = null;
     this.currentAgencyId = null;
     this.listeners = new Map();
+    this._activeRunId = null;
 
     // SECURITY: The private key is captured in a closure here and never stored
     // as a property on this object. An LLM agent inspecting `this` via
@@ -252,6 +256,296 @@ export class CrustoceanAgent {
   }
 
   /**
+   * Execute a slash command as a tool call. The result comes back via ack
+   * without appearing in the room — ideal for multi-step agent workflows
+   * where command results are intermediate LLM context, not chat messages.
+   *
+   * Pass { silent: false } to also emit the command response into the room
+   * (matching the behavior of a user running the command manually).
+   *
+   * @param {string} commandString - Full command string, e.g. '/notes' or '/save key value'
+   * @param {Object} [opts]
+   * @param {number} [opts.timeout=15000] - Timeout in ms
+   * @param {boolean} [opts.silent=true] - When true, result is returned via ack only (no room message)
+   * @returns {Promise<{ok: boolean, command?: string, content?: string, type?: string, ephemeral?: boolean, queued?: boolean}>}
+   */
+  async executeCommand(commandString, { timeout = 15000, silent = true } = {}) {
+    if (!this.socket?.connected || !this.currentAgencyId) {
+      throw new Error('Not connected or no agency joined. Call join() first.');
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Command timeout')), timeout);
+      this.socket.emit('send-message', {
+        agencyId: this.currentAgencyId,
+        content: String(commandString).trim(),
+        silent,
+      }, (result) => {
+        clearTimeout(timer);
+        resolve(result);
+      });
+    });
+  }
+
+  /**
+   * Start a traced execution context. Commands run via trace.command() are
+   * executed silently and recorded as trace steps. Call trace.finish() to get
+   * metadata (trace array + total duration) ready to attach to a send() call.
+   *
+   * @example
+   *   const trace = agent.startTrace();
+   *   const notes = await trace.command('/notes');
+   *   const price = await trace.command('/price ETH');
+   *   // ... feed notes.content + price.content into your LLM ...
+   *   agent.send(llmResponse, { type: 'tool_result', metadata: trace.finish() });
+   *
+   * @param {Object} [opts]
+   * @param {number} [opts.timeout=15000] - Default timeout per command
+   * @returns {{ command: Function, finish: Function }}
+   */
+  startTrace({ timeout = 15000 } = {}) {
+    const agent = this;
+    const steps = [];
+    const traceStart = Date.now();
+
+    return {
+      /**
+       * Run a slash command silently and record it as a trace step.
+       * @param {string} commandString
+       * @param {Object} [opts]
+       * @param {number} [opts.timeout]
+       * @returns {Promise<{ok: boolean, command?: string, content?: string, type?: string}>}
+       */
+      async command(commandString, cmdOpts = {}) {
+        const start = Date.now();
+        let result;
+        let status = 'done';
+        try {
+          result = await agent.executeCommand(commandString, { timeout: cmdOpts.timeout || timeout });
+          if (!result?.ok) status = 'error';
+        } catch (err) {
+          status = 'error';
+          result = { ok: false, content: err.message };
+        }
+        steps.push({
+          step: commandString,
+          duration: `${Date.now() - start}ms`,
+          status,
+        });
+        return result;
+      },
+
+      /**
+       * Finalize the trace. Returns metadata object with trace steps and total duration.
+       * @returns {{ trace: Array<{step: string, duration: string, status: string}>, duration: string }}
+       */
+      finish() {
+        return {
+          trace: steps,
+          duration: `${Date.now() - traceStart}ms`,
+        };
+      },
+    };
+  }
+
+  /**
+   * Start an Agent Run — a bounded execution context with lifecycle events,
+   * streaming, tool calls, permission gates, and a replayable transcript.
+   *
+   * The run emits structured events (agent-run-*) that the Crustocean UI
+   * renders as a live timeline with status indicators, tool cards, streaming
+   * output, and interrupt controls.
+   *
+   * @param {Object} opts
+   * @param {Object} opts.trigger - The message that started this run
+   * @param {number} [opts.timeout=15000] - Default timeout per tool call
+   * @returns {AgentRunContext}
+   *
+   * @example
+   *   const run = agent.startRun({ trigger: msg });
+   *   run.setStatus('analyzing...');
+   *   const notes = await run.toolCall('/notes');
+   *   const stream = run.createStream();
+   *   for await (const token of llmStream) stream.push(token);
+   *   stream.finish();
+   *   run.complete('Done.');
+   */
+  startRun({ trigger, timeout = 15000 } = {}) {
+    if (!this.socket?.connected || !this.currentAgencyId) {
+      throw new Error('Not connected or no agency joined. Call join() first.');
+    }
+    if (this._activeRunId) {
+      throw new Error(`Run ${this._activeRunId} is already active. Call complete() or error() first.`);
+    }
+
+    const agent = this;
+    const runId = crypto.randomUUID();
+    const agencyId = this.currentAgencyId;
+    const agentId = this.user?.id;
+    const username = this.user?.username;
+    const displayName = this.user?.display_name || username;
+    const transcript = [];
+    const runStart = Date.now();
+    let _interrupted = false;
+    let _interruptMessage = null;
+    let _interruptHandler = null;
+    let _finished = false;
+    const _permissionTimers = new Set();
+
+    agent._activeRunId = runId;
+
+    const emit = (event, payload) => {
+      agent.socket.emit(event, { runId, agencyId, agentId, username, displayName, ...payload });
+    };
+
+    const record = (entry) => {
+      transcript.push({ ...entry, ts: Date.now() - runStart });
+    };
+
+    emit('agent-run-start', {
+      triggerMessageId: trigger?.id || null,
+    });
+    record({ type: 'start', triggerMessageId: trigger?.id || null });
+
+    const onInterrupt = (payload) => {
+      if (payload.runId !== runId) return;
+      _interrupted = true;
+      _interruptMessage = payload.message || null;
+      record({ type: 'interrupt', action: payload.action, message: payload.message });
+      if (_interruptHandler) _interruptHandler(payload);
+    };
+    agent.socket.on('agent-run-interrupt', onInterrupt);
+
+    let _permissionResolvers = {};
+    const onPermissionResponse = (payload) => {
+      if (payload.runId !== runId) return;
+      const resolver = _permissionResolvers[payload.permissionId];
+      if (resolver) {
+        record({ type: 'permission-response', permissionId: payload.permissionId, decision: payload.decision, message: payload.message });
+        resolver(payload.decision === 'approve');
+        delete _permissionResolvers[payload.permissionId];
+      }
+    };
+    agent.socket.on('agent-run-permission-response', onPermissionResponse);
+
+    const cleanup = () => {
+      agent.socket.off('agent-run-interrupt', onInterrupt);
+      agent.socket.off('agent-run-permission-response', onPermissionResponse);
+      for (const timer of _permissionTimers) clearTimeout(timer);
+      _permissionTimers.clear();
+      _permissionResolvers = {};
+      if (agent._activeRunId === runId) agent._activeRunId = null;
+    };
+
+    return {
+      get runId() { return runId; },
+      get interrupted() { return _interrupted; },
+      get interruptMessage() { return _interruptMessage; },
+
+      record(entry) {
+        record(entry);
+      },
+
+      onInterrupt(handler) {
+        _interruptHandler = handler;
+      },
+
+      setStatus(status) {
+        emit('agent-run-status', { status });
+        record({ type: 'status', status });
+      },
+
+      async toolCall(commandString, opts = {}) {
+        const toolCallId = crypto.randomUUID();
+        const tool = commandString.split(/\s+/)[0];
+        const input = commandString.slice(tool.length).trim();
+        const start = Date.now();
+
+        emit('agent-run-tool-call', { toolCallId, tool, input, status: 'running' });
+        record({ type: 'tool-call', toolCallId, tool, input });
+
+        let result;
+        let status = 'done';
+        try {
+          result = await agent.executeCommand(commandString, { timeout: opts.timeout || timeout });
+          if (!result?.ok) status = 'error';
+        } catch (err) {
+          status = 'error';
+          result = { ok: false, content: err.message };
+        }
+
+        const duration = `${Date.now() - start}ms`;
+        emit('agent-run-tool-result', { toolCallId, tool, output: result?.content || '', duration, status });
+        record({ type: 'tool-result', toolCallId, tool, output: result?.content || '', duration, status });
+
+        return result;
+      },
+
+      createStream() {
+        const messageId = crypto.randomUUID();
+        let accumulated = '';
+
+        record({ type: 'stream-start', messageId });
+
+        return {
+          push(delta) {
+            accumulated += delta;
+            emit('agent-run-stream', { messageId, delta, content: accumulated, done: false });
+          },
+
+          finish(opts = {}) {
+            const final = opts.content !== undefined ? opts.content : accumulated;
+            const payload = { messageId, content: final, done: true };
+            if (opts.metadata) payload.metadata = opts.metadata;
+            emit('agent-run-stream', payload);
+            record({ type: 'stream-end', messageId, contentLength: final.length });
+            return final;
+          },
+
+          get content() { return accumulated; },
+        };
+      },
+
+      async requestPermission({ action, description, timeoutMs = 120_000 }) {
+        const permissionId = crypto.randomUUID();
+        emit('agent-run-permission', { permissionId, action, description });
+        record({ type: 'permission-request', permissionId, action, description });
+
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            record({ type: 'permission-response', permissionId, decision: 'deny', message: 'timeout' });
+            delete _permissionResolvers[permissionId];
+            _permissionTimers.delete(timer);
+            resolve(false);
+          }, timeoutMs);
+          _permissionTimers.add(timer);
+
+          _permissionResolvers[permissionId] = (approved) => {
+            clearTimeout(timer);
+            _permissionTimers.delete(timer);
+            resolve(approved);
+          };
+        });
+      },
+
+      complete(summary) {
+        if (_finished) return;
+        _finished = true;
+        record({ type: 'complete', summary });
+        emit('agent-run-complete', { summary, transcript });
+        cleanup();
+      },
+
+      error(message) {
+        if (_finished) return;
+        _finished = true;
+        record({ type: 'error', message });
+        emit('agent-run-error', { error: message, transcript });
+        cleanup();
+      },
+    };
+  }
+
+  /**
    * Edit a message you previously sent in the current agency.
    * @param {string} messageId
    * @param {string} content
@@ -289,6 +583,77 @@ export class CrustoceanAgent {
       }
     }
     return joined;
+  }
+
+  // ─── Direct Messages ──────────────────────────────────────────────────
+
+  /**
+   * Get this agent's DM conversations.
+   * @returns {Promise<Array<{agencyId, participant}>>}
+   */
+  async getDMs() {
+    if (!this.token) await this.connect();
+    const res = await fetch(`${this.apiUrl}/api/dm`, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    if (!res.ok) throw new Error(`Failed to fetch DMs: ${res.status}`);
+    return res.json();
+  }
+
+  /**
+   * Join all DM conversations so this agent receives DM messages.
+   * Call after connectSocket().
+   * @returns {Promise<string[]>} - Agency IDs of DM rooms joined
+   */
+  async joinDMs() {
+    const dms = await this.getDMs();
+    const joined = [];
+    for (const dm of dms) {
+      try {
+        const savedAgency = this.currentAgencyId;
+        this.socket.emit('join-agency', { agencyId: dm.agencyId });
+        joined.push(dm.agencyId);
+        this.currentAgencyId = savedAgency;
+      } catch (err) {
+        console.warn(`Failed to join DM ${dm.agencyId}:`, err.message);
+      }
+    }
+    return joined;
+  }
+
+  /**
+   * Send a message in a specific DM conversation.
+   * @param {string} content - Message text
+   * @param {string} agencyId - The DM agency ID
+   * @param {Object} [options] - Same as send()
+   */
+  sendDM(content, agencyId, options = {}) {
+    if (!this.socket?.connected) {
+      throw new Error('Not connected. Call connectSocket() first.');
+    }
+    const payload = {
+      agencyId,
+      content: String(content).trim(),
+    };
+    if (options.type) payload.type = options.type;
+    if (options.metadata != null) payload.metadata = options.metadata;
+    this.socket.emit('send-message', payload);
+  }
+
+  /**
+   * Register a handler for direct messages. Filters to messages where msg.dm === true
+   * and ignores messages sent by this agent.
+   * @param {Function} handler - (msg) => void
+   * @returns {Function} - Unsubscribe function
+   */
+  onDirectMessage(handler) {
+    const wrapper = (msg) => {
+      if (!msg.dm) return;
+      if (this.user && msg.sender_id === this.user.id) return;
+      handler(msg);
+    };
+    this.on('message', wrapper);
+    return () => this.off('message', wrapper);
   }
 
   /**
