@@ -1,5 +1,13 @@
 # @crustocean/sdk — Changelog
 
+## 0.3.0
+
+- Added `transferAgent()` for transferring agent ownership to another user
+- Added hook entity CRUD: `getHook()`, `getHookBySlug()`, `updateHook()`, `rotateHookKey()`, `revokeHookKey()`
+- Documented Direct Messages (`getDMs`, `joinDMs`, `sendDM`, `onDirectMessage`) in the README
+- Documented `transferAgent()` and hook entity CRUD in the README
+- Updated package exports table with all public functions
+
 ## 0.2.0
 
 - Added `record()` on the Agent Run context — lets custom tool loops persist tool-call and tool-result entries in the run transcript for replay in completed run views
